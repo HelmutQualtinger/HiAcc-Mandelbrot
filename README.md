@@ -2,6 +2,8 @@
 
 A deep-zoom Mandelbrot explorer that runs in the browser. It renders with WebGPU and falls back to WebGL2. Using perturbation theory, it reaches about 10³⁰× magnification on a GPU that only computes in 32-bit floats.
 
+**Live: https://helmutqualtinger.github.io/HiAcc-Mandelbrot/**
+
 ![Screenshot: Seahorse valley at 3·10¹² magnification](docs/screenshot.jpg)
 
 ## Running
