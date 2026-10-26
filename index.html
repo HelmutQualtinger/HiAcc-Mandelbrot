@@ -1,0 +1,867 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HiAcc Mandelbrot</title>
+<style>
+  :root {
+    --bg: #07080b; --panel: rgba(14, 16, 22, 0.88); --line: rgba(255,255,255,0.10);
+    --text: #e6e8ee; --muted: #8a90a0; --accent: #7cc4ff; --warn: #ffb86b;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; touch-action: none; cursor: grab; }
+  #stage.drag { cursor: grabbing; }
+  canvas#c { width: 100%; height: 100%; display: block; }
+  #panel { position: fixed; top: 12px; left: 12px; width: 330px; max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px); overflow: auto; background: var(--panel); backdrop-filter: blur(8px);
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  #panel.hidden > :not(header) { display: none; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+    margin: 14px 0 0; padding-top: 10px; border-top: 1px solid var(--line); }
+  .badge { font: 11px var(--mono); padding: 2px 6px; border-radius: 4px; background: rgba(124,196,255,.15); color: var(--accent); }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .row > label { width: 78px; flex: none; color: var(--muted); }
+  .row > :not(label):not(.val) { flex: 1; min-width: 0; }
+  .val { width: 52px; flex: none; text-align: right; font: 11.5px var(--mono); color: var(--text); }
+  textarea, input[type=text], input[type=number], select { width: 100%; background: rgba(255,255,255,.05); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: 12px var(--mono); }
+  textarea { resize: vertical; min-height: 34px; word-break: break-all; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  button { background: rgba(255,255,255,.07); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 9px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .swatches { display: grid; gap: 4px; margin-top: 8px; }
+  .swatch { display: grid; grid-template-columns: 62px 1fr; align-items: center; gap: 8px; padding: 3px 5px;
+    border: 1px solid transparent; border-radius: 6px; cursor: pointer; color: var(--muted); font-size: 12px; }
+  .swatch:hover { border-color: var(--line); }
+  .swatch.sel { border-color: var(--accent); color: var(--text); background: rgba(124,196,255,.08); }
+  .swatch canvas, #curStrip { width: 100%; height: 14px; border-radius: 3px; display: block; }
+  #curStrip { height: 22px; margin-top: 8px; }
+  .stats { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line);
+    font: 11.5px/1.6 var(--mono); color: var(--muted); display: grid; grid-template-columns: auto 1fr; column-gap: 10px; }
+  .stats b { color: var(--text); font-weight: 500; text-align: right; }
+  .help { margin-top: 8px; color: var(--muted); font-size: 11.5px; }
+  .warn { color: var(--warn); }
+  #toggle { padding: 2px 8px; }
+  #progress { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); display: none; align-items: center; gap: 12px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; font: 12px var(--mono); }
+  #err { position: fixed; inset: 0; display: none; place-items: center; text-align: center; padding: 24px; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+
+<div id="panel">
+  <header>
+    <h1>HiAcc Mandelbrot <span class="badge" id="backendBadge">…</span></h1>
+    <button id="toggle" title="Hide/show panel (H)">–</button>
+  </header>
+
+  <div class="row"><label>Re</label><textarea id="re" rows="2" spellcheck="false"></textarea></div>
+  <div class="row"><label>Im</label><textarea id="im" rows="2" spellcheck="false"></textarea></div>
+  <div class="row"><label>Zoom</label><input id="zoom" type="text" spellcheck="false"></div>
+  <div class="btns"><button id="go">Go to</button><button id="reset">Reset (R)</button>
+    <button id="copy">Copy link</button><button id="png">Save PNG</button>
+    <select id="pngScale" title="PNG size relative to the screen" style="width:auto;flex:none">
+      <option value="1">1×</option><option value="2">2×</option><option value="4" selected>4×</option></select></div>
+  <div class="row"><label>Location</label><select id="preset"></select></div>
+
+  <h2>Rendering</h2>
+  <div class="row"><label>Backend</label><select id="backend">
+    <option value="webgpu">WebGPU</option><option value="webgl">WebGL2</option></select></div>
+  <div class="row"><label>Iterations</label><input id="iters" type="number" min="16" max="1000000" step="1">
+    <label style="width:auto"><input id="autoIter" type="checkbox" checked> auto</label></div>
+  <div class="row"><label>Resolution</label><select id="quality">
+    <option value="0.5">50 %</option><option value="0.75">75 %</option><option value="1" selected>100 %</option></select></div>
+  <div class="row"><label>Auto-zoom</label><input id="autozoom" type="checkbox" style="flex:none">
+    <span style="color:var(--muted)">zoom into center continuously</span></div>
+
+  <h2>Color map</h2>
+  <div class="swatches" id="swatches"></div>
+  <canvas id="curStrip" width="600" height="22" title="Current mapping: colors from iteration 0 (left) over the visible cycles"></canvas>
+
+  <h2>Color cycling</h2>
+  <div class="row"><label>Cycle length</label><input id="cycleLen" type="range" min="1" max="14" step="0.01" value="5.64"><span class="val" id="vCycleLen"></span></div>
+  <div class="row"><label>Mapping</label><select id="mapping">
+    <option value="0">linear (iterations)</option><option value="1">square root</option><option value="2">logarithmic</option></select></div>
+  <div class="row"><label>Offset</label><input id="phase" type="range" min="0" max="1" step="0.001" value="0"><span class="val" id="vPhase"></span></div>
+  <div class="row"><label>Speed</label><input id="speed" type="range" min="-2" max="2" step="0.01" value="0"><span class="val" id="vSpeed"></span></div>
+  <div class="btns"><button id="stopCycle">Stop cycling</button><button id="reverse">Reverse</button></div>
+
+  <h2>Relief</h2>
+  <div class="row"><label>Strength</label><input id="relief" type="range" min="0" max="1.5" step="0.01" value="0.5"><span class="val" id="vRelief"></span></div>
+  <div class="row"><label>Light angle</label><input id="light" type="range" min="0" max="360" step="1" value="45"><span class="val" id="vLight"></span></div>
+  <div class="row"><label>Light height</label><input id="lightH" type="range" min="0.2" max="4" step="0.01" value="1.5"><span class="val" id="vLightH"></span></div>
+
+  <div class="stats">
+    <span>magnification</span><b id="sZoom"></b>
+    <span>pixel size</span><b id="sPix"></b>
+    <span>max iterations</span><b id="sIter"></b>
+    <span>reference orbit</span><b id="sRef"></b>
+    <span>reference precision</span><b id="sBits"></b>
+    <span>render time</span><b id="sMs"></b>
+  </div>
+  <div class="help" id="note"></div>
+  <div class="help">Drag to pan · wheel / pinch to zoom · double-click zoom in (shift: out) ·
+    arrows pan · +/− zoom · H hide panel · C start/stop cycling</div>
+</div>
+<div id="progress"><span id="progText"></span><button id="cancelExport">Cancel</button></div>
+<div id="err"></div>
+
+<script>
+'use strict';
+// ---------- Arbitrary-precision fixed point (BigInt, PREC fractional bits) ----------
+// The view center lives in BigInt so it never loses precision; the GPU only sees small
+// float32 deltas relative to a reference orbit (perturbation theory with rebasing).
+const PREC = 320, P = BigInt(PREC), TWO_P = 2 ** PREC;
+const fromNum = v => BigInt(Math.round(v * TWO_P));
+const toNum = b => Number(b) / TWO_P;
+function toDec(b, digits) {
+  const neg = b < 0n; if (neg) b = -b;
+  const ip = b >> P, frac = b & ((1n << P) - 1n);
+  const f = (frac * 10n ** BigInt(digits)) >> P;
+  return (neg ? '-' : '') + ip + '.' + f.toString().padStart(digits, '0');
+}
+function parseDec(s) {
+  s = s.trim().replace(/\s+/g, '');
+  if (!/^[-+]?\d*\.?\d*$/.test(s) || !/\d/.test(s)) throw Error('bad number: ' + s);
+  const neg = s[0] === '-'; s = s.replace(/^[-+]/, '');
+  const [i, f = ''] = s.split('.');
+  const den = 10n ** BigInt(f.length);
+  const r = ((BigInt(i || '0') * den + BigInt(f || '0')) << P) / den;
+  return neg ? -r : r;
+}
+
+const MIN_H = 1e-30, MAX_H = 20;          // float32 deltas stay in normal range down to ~1e-30
+const HOME = { re: '-0.5', im: '0', h: 3 };
+const PRESETS = [
+  ['Home', HOME],
+  ['Seahorse valley (deep)', { re: '-0.743643887037158704752191506114774', im: '0.131825904205311970493132056385139', h: 1e-12 }],
+  ['Spiral', { re: '-0.761574', im: '-0.0847596', h: 0.004 }],
+  ['Elephant valley', { re: '0.282', im: '0.01', h: 0.03 }],
+  ['Period-3 minibrot', { re: '-1.75487766624669276', im: '0', h: 0.05 }],
+];
+// Cosine palettes: color(t) = a + b * cos(2π (c t + d))
+const PALETTES = [
+  ['Classic', [.5,.5,.5], [.5,.5,.5], [1,1,1], [0,.10,.20]],
+  ['Fire',    [.5,.5,.5], [.5,.5,.5], [1,.7,.4], [0,.15,.20]],
+  ['Ocean',   [.5,.5,.5], [.5,.5,.5], [1,1,.5], [.8,.9,.3]],
+  ['Neon',    [.5,.5,.5], [.5,.5,.5], [2,1,0], [.5,.2,.25]],
+  ['Rainbow', [.5,.5,.5], [.5,.5,.5], [1,1,1], [0,.33,.67]],
+  ['Gold',    [.55,.45,.25], [.45,.4,.25], [1,1,1], [0,.05,.12]],
+  ['Ice',     [.55,.65,.75], [.45,.35,.25], [1,1,1], [.55,.55,.55]],
+  ['Gray',    [.5,.5,.5], [.5,.5,.5], [1,1,1], [0,0,0]],
+];
+const MAP_SCALE = [1, 8, 40];   // keeps cycle length in a similar visual range for each mapping
+const mapMu = (mu, mode) => mode === 0 ? mu : mode === 1 ? Math.sqrt(mu) * MAP_SCALE[1] : Math.log(mu + 1) * MAP_SCALE[2];
+
+const view = { cx: parseDec(HOME.re), cy: parseDec(HOME.im), h: HOME.h };
+const opts = { autoIter: true, manualIter: 1000, palette: 0, cycleLen: 50, mapping: 0, phase: 0, speed: 0,
+  relief: 0.5, light: 45, lightH: 1.5, quality: 1, autoZoom: false };
+// Placeholder reference: c = 0 has orbit 0,0,... which is exact, so rendering works before the worker replies.
+let ref = { cx: 0n, cy: 0n, orbit: new Float32Array(4), len: 2, bits: 0, ms: 0 };
+
+function maxIter() {
+  if (!opts.autoIter) return opts.manualIter;
+  const L = Math.max(0, Math.log10(3 / view.h));
+  return Math.min(1000000, Math.round(250 + 100 * L ** 1.6));
+}
+
+// ---------- Reference orbit worker (BigInt arithmetic, off the main thread) ----------
+const workerSrc = `
+onmessage = e => {
+  const { id, cx, cy, bits, prec, maxIter } = e.data;
+  const t0 = performance.now();
+  const sh = BigInt(prec - bits), B = BigInt(bits), S = 2 ** bits;
+  const x0 = cx >> sh, y0 = cy >> sh;
+  const out = new Float32Array((maxIter + 1) * 2);
+  let x = 0n, y = 0n, n = 1;
+  for (; n <= maxIter; n++) {
+    const xx = (x * x) >> B, yy = (y * y) >> B, xy = (x * y) >> B;
+    x = xx - yy + x0; y = 2n * xy + y0;
+    const fx = Number(x) / S, fy = Number(y) / S;
+    out[2 * n] = fx; out[2 * n + 1] = fy;
+    if (fx * fx + fy * fy > 4) { n++; break; }
+  }
+  const orbit = out.slice(0, 2 * n);
+  postMessage({ id, cx, cy, bits, orbit, len: n, ms: performance.now() - t0 }, [orbit.buffer]);
+};`;
+const worker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' })));
+let inFlight = false, wantRef = false, refTimer = 0, lastReq = 0;
+
+function requestRef() {
+  if (inFlight) { wantRef = true; return; }
+  inFlight = true; lastReq = performance.now();
+  const zoomBits = Math.ceil(Math.log2(Math.max(1, canvas.height) / view.h));
+  const bits = Math.min(PREC - 8, Math.max(64, zoomBits + 64));
+  worker.postMessage({ id: 0, cx: view.cx, cy: view.cy, bits, prec: PREC, maxIter: maxIter() });
+  setNote('computing reference orbit…');
+}
+worker.onmessage = e => {
+  inFlight = false;
+  const d = e.data;
+  ref = { cx: d.cx, cy: d.cy, orbit: d.orbit, len: d.len, bits: d.bits, ms: d.ms };
+  R?.setOrbit(ref.orbit, ref.len);
+  setNote('');
+  dirty = true;
+  if (wantRef) { wantRef = false; requestRef(); }
+};
+function scheduleRef() {
+  clearTimeout(refTimer);
+  if (performance.now() - lastReq > 400) requestRef();   // keep refreshing during long gestures
+  else refTimer = setTimeout(requestRef, 90);
+}
+
+// ---------- Shaders ----------
+// Two passes: (1) iterate -> float texture holding smooth iteration count + surface normal,
+// (2) colorize. Palette, cycling and relief changes only re-run pass 2, so they are instant.
+const WGSL_UNIFORMS = `
+struct U {
+  res: vec2f, scale: f32, cycleLen: f32,
+  off: vec2f, phase: f32, relief: f32,
+  pa: vec4f, pb: vec4f, pc: vec4f, pd: vec4f,   // .w of pa/pb/pc = light dir x, light dir y, light height; pd.w = mapping
+  maxIter: u32, refLen: u32, org: vec2f,   // org = top-left pixel of this chunk in the full image
+};
+@group(0) @binding(0) var<uniform> u: U;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const WGSL_ITER = WGSL_UNIFORMS + `
+@group(0) @binding(1) var<storage, read> orbit: array<vec2f>;
+
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let dc = vec2f(pos.x + u.org.x - 0.5 * u.res.x, 0.5 * u.res.y - pos.y - u.org.y) * u.scale + u.off;
+  var dz = vec2f(0.0);
+  var dd = vec2f(0.0);          // dz/dc times pixel size (kept scaled so it can't overflow at deep zoom)
+  var z = vec2f(0.0);
+  var m = 0u; var i = 0u; var r2 = 0.0;
+  let last = u.refLen - 1u;
+  loop {
+    if (i >= u.maxIter) { break; }
+    let Z = orbit[m];
+    let zf = Z + dz;
+    dd = 2.0 * vec2f(zf.x * dd.x - zf.y * dd.y, zf.x * dd.y + zf.y * dd.x) + vec2f(u.scale, 0.0);
+    // dz' = 2 Z dz + dz^2 + dc
+    dz = vec2f(2.0 * (Z.x * dz.x - Z.y * dz.y) + dz.x * dz.x - dz.y * dz.y + dc.x,
+               2.0 * (Z.x * dz.y + Z.y * dz.x + dz.x * dz.y) + dc.y);
+    m += 1u; i += 1u;
+    z = orbit[m] + dz;
+    r2 = dot(z, z);
+    if (r2 > 65536.0) { break; }
+    // Rebase (Zhuoran): restart the reference when the full value gets smaller than the delta
+    if (r2 < dot(dz, dz) || m >= last) { dz = z; m = 0u; }
+  }
+  if (i >= u.maxIter) { return vec4f(0.0); }
+  let mu = f32(i) + 1.0 - log2(0.5 * log2(r2));
+  var w = vec2f(z.x * dd.x + z.y * dd.y, z.y * dd.x - z.x * dd.y);   // z / dz/dc direction = surface normal
+  w = w / max(max(abs(w.x), abs(w.y)), 1e-30);
+  let l = length(w);
+  let n = select(vec2f(0.0), w / l, l > 0.0);
+  return vec4f(mu, n, 1.0);
+}`;
+
+const WGSL_COLOR = WGSL_UNIFORMS + `
+@group(0) @binding(1) var data: texture_2d<f32>;
+
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let d = textureLoad(data, vec2i(pos.xy), 0);
+  if (d.w == 0.0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
+  let mu = max(d.x, 0.0);
+  let mode = u32(u.pd.w);
+  var s = mu;
+  if (mode == 1u) { s = sqrt(mu) * ${MAP_SCALE[1]}.0; } else if (mode == 2u) { s = log(mu + 1.0) * ${MAP_SCALE[2]}.0; }
+  let t = s / u.cycleLen + u.phase;
+  var col = u.pa.rgb + u.pb.rgb * cos(6.2831853 * (u.pc.rgb * t + u.pd.rgb));
+  let h = u.pc.w;
+  let lam = (dot(d.yz, vec2f(u.pa.w, u.pb.w)) + h) / (1.0 + h);
+  col = col * mix(1.0, 1.3 * max(lam, 0.0), u.relief);
+  return vec4f(clamp(col, vec3f(0.0), vec3f(1.0)), 1.0);
+}`;
+
+const GLSL_VS = `#version 300 es
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const GLSL_ITER = `#version 300 es
+precision highp float; precision highp int;
+uniform vec2 res, off, org; uniform float scale; uniform int maxIter, refLen;
+uniform highp sampler2D orbitTex;
+out vec4 outData;
+vec2 Z(int m) { return texelFetch(orbitTex, ivec2(m & 4095, m >> 12), 0).xy; }
+void main() {
+  vec2 dc = (gl_FragCoord.xy + org - 0.5 * res) * scale + off;
+  vec2 dz = vec2(0.0), dd = vec2(0.0), z = vec2(0.0);
+  int m = 0, i = 0, last = refLen - 1; float r2 = 0.0;
+  for (;;) {
+    if (i >= maxIter) break;
+    vec2 z0 = Z(m), zf = z0 + dz;
+    dd = 2.0 * vec2(zf.x * dd.x - zf.y * dd.y, zf.x * dd.y + zf.y * dd.x) + vec2(scale, 0.0);
+    dz = vec2(2.0 * (z0.x * dz.x - z0.y * dz.y) + dz.x * dz.x - dz.y * dz.y + dc.x,
+              2.0 * (z0.x * dz.y + z0.y * dz.x + dz.x * dz.y) + dc.y);
+    m++; i++;
+    z = Z(m) + dz;
+    r2 = dot(z, z);
+    if (r2 > 65536.0) break;
+    if (r2 < dot(dz, dz) || m >= last) { dz = z; m = 0; }
+  }
+  if (i >= maxIter) { outData = vec4(0.0); return; }
+  float mu = float(i) + 1.0 - log2(0.5 * log2(r2));
+  vec2 w = vec2(z.x * dd.x + z.y * dd.y, z.y * dd.x - z.x * dd.y);
+  w /= max(max(abs(w.x), abs(w.y)), 1e-30);
+  float l = length(w);
+  outData = vec4(mu, l > 0.0 ? w / l : vec2(0.0), 1.0);
+}`;
+const GLSL_COLOR = `#version 300 es
+precision highp float; precision highp int;
+uniform float cycleLen, phase, relief, lightH; uniform int mapping;
+uniform vec2 lightDir; uniform vec3 pa, pb, pc, pd;
+uniform highp sampler2D dataTex;
+out vec4 outColor;
+void main() {
+  vec4 d = texelFetch(dataTex, ivec2(gl_FragCoord.xy), 0);
+  if (d.w == 0.0) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+  float mu = max(d.x, 0.0), s = mu;
+  if (mapping == 1) s = sqrt(mu) * ${MAP_SCALE[1]}.0; else if (mapping == 2) s = log(mu + 1.0) * ${MAP_SCALE[2]}.0;
+  float t = s / cycleLen + phase;
+  vec3 col = pa + pb * cos(6.2831853 * (pc * t + pd));
+  float lam = (dot(d.yz, lightDir) + lightH) / (1.0 + lightH);
+  col *= mix(1.0, 1.3 * max(lam, 0.0), relief);
+  outColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+}`;
+
+// Uniform block shared by both backends (layout matches WGSL struct U, 112 bytes)
+const UB = new ArrayBuffer(112), F = new Float32Array(UB), U32 = new Uint32Array(UB);
+// ex = { W, H, ox, oy }: render the chunk at (ox, oy) of a W×H image instead of the screen
+function fillUniforms(ex = { W: canvas.width, H: canvas.height, ox: 0, oy: 0 }) {
+  const pal = PALETTES[opts.palette], a = opts.light * Math.PI / 180;
+  F[0] = ex.W; F[1] = ex.H; F[2] = view.h / ex.H; F[3] = opts.cycleLen;
+  F[4] = toNum(view.cx - ref.cx); F[5] = toNum(view.cy - ref.cy); F[6] = opts.phase; F[7] = opts.relief;
+  for (let k = 0; k < 4; k++) F.set(pal[k + 1], 8 + 4 * k);
+  F[11] = Math.cos(a); F[15] = Math.sin(a); F[19] = opts.lightH; F[23] = opts.mapping;
+  U32[24] = maxIter(); U32[25] = ref.len; F[26] = ex.ox; F[27] = ex.oy;
+}
+
+// ---------- WebGPU backend ----------
+async function createWebGPU(canvas) {
+  if (!navigator.gpu) throw Error('WebGPU not available in this browser');
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) throw Error('No WebGPU adapter');
+  const device = await adapter.requestDevice();
+  const ctx = canvas.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode: 'opaque' });
+  const iterModule = device.createShaderModule({ code: WGSL_ITER });
+  const colorModule = device.createShaderModule({ code: WGSL_COLOR });
+  const iterPipe = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: iterModule, entryPoint: 'vs' },
+    fragment: { module: iterModule, entryPoint: 'fs', targets: [{ format: 'rgba32float' }] },
+  });
+  const colorBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } }] });
+  const colorPipe = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [colorBGL] }),
+    vertex: { module: colorModule, entryPoint: 'vs' },
+    fragment: { module: colorModule, entryPoint: 'fs', targets: [{ format }] },
+  });
+  const ubuf = device.createBuffer({ size: UB.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  let obuf = null, iterBind = null, dataTex = null, colorBind = null, destroyed = false;
+  device.lost.then(info => { if (!destroyed) fatal('WebGPU device lost: ' + info.message); });
+
+  function ensureData() {
+    if (dataTex && dataTex.width === canvas.width && dataTex.height === canvas.height) return;
+    dataTex?.destroy();
+    dataTex = device.createTexture({ size: [canvas.width, canvas.height], format: 'rgba32float',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    colorBind = device.createBindGroup({ layout: colorBGL, entries: [
+      { binding: 0, resource: { buffer: ubuf } }, { binding: 1, resource: dataTex.createView() }] });
+  }
+  const pass = (enc, view, pipe, bind, rect) => {
+    const p = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: rect ? 'load' : 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }] });
+    p.setPipeline(pipe); p.setBindGroup(0, bind);
+    if (rect) p.setScissorRect(...rect);
+    p.draw(3); p.end();
+  };
+  return {
+    name: 'WebGPU',
+    setOrbit(arr) {
+      const size = Math.max(256, 2 ** Math.ceil(Math.log2(arr.byteLength)));
+      if (!obuf || obuf.size < size) {
+        obuf?.destroy();
+        obuf = device.createBuffer({ size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        iterBind = device.createBindGroup({ layout: iterPipe.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: { buffer: ubuf } }, { binding: 1, resource: { buffer: obuf } }] });
+      }
+      device.queue.writeBuffer(obuf, 0, arr);
+    },
+    // One submit per tile keeps every command buffer short (avoids GPU watchdog resets on deep views)
+    iterTiles(rects) {
+      ensureData();
+      device.queue.writeBuffer(ubuf, 0, UB);
+      const view = dataTex.createView();
+      for (const r of rects) {
+        const enc = device.createCommandEncoder();
+        pass(enc, view, iterPipe, iterBind, r);
+        device.queue.submit([enc.finish()]);
+      }
+    },
+    colorize() {
+      ensureData();
+      device.queue.writeBuffer(ubuf, 0, UB);
+      const enc = device.createCommandEncoder();
+      pass(enc, ctx.getCurrentTexture().createView(), colorPipe, colorBind);
+      device.queue.submit([enc.finish()]);
+      return device.queue.onSubmittedWorkDone();
+    },
+    finish: () => device.queue.onSubmittedWorkDone(),
+    destroy() { destroyed = true; device.destroy(); },
+  };
+}
+
+// ---------- WebGL2 backend ----------
+function createWebGL(canvas) {
+  const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: false });
+  if (!gl) throw Error('WebGL2 not available');
+  if (!gl.getExtension('EXT_color_buffer_float')) throw Error('WebGL2 lacks EXT_color_buffer_float');
+  const program = (fsSrc) => {
+    const sh = (type, src) => {
+      const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw Error(gl.getShaderInfoLog(s));
+      return s;
+    };
+    const p = gl.createProgram();
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, GLSL_VS)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw Error(gl.getProgramInfoLog(p));
+    const L = {};
+    for (let k = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS); k--;) {
+      const n = gl.getActiveUniform(p, k).name; L[n] = gl.getUniformLocation(p, n);
+    }
+    return { p, L };
+  };
+  const iter = program(GLSL_ITER), color = program(GLSL_COLOR);
+  const tex = unit => {
+    const t = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return t;
+  };
+  const orbitTex = tex(0), dataTex = tex(1), fbo = gl.createFramebuffer();
+  gl.useProgram(iter.p); gl.uniform1i(iter.L.orbitTex, 0);
+  gl.useProgram(color.p); gl.uniform1i(color.L.dataTex, 1);
+  let dw = 0, dh = 0;
+  const px = new Uint8Array(4);
+  return {
+    name: 'WebGL2',
+    setOrbit(arr, len) {
+      const rows = Math.ceil(len / 4096), data = new Float32Array(4096 * rows * 2);
+      data.set(arr.subarray(0, len * 2));
+      gl.activeTexture(gl.TEXTURE0);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, 4096, rows, 0, gl.RG, gl.FLOAT, data);
+    },
+    iterTiles(rects) {
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      if (dw !== canvas.width || dh !== canvas.height) {
+        dw = canvas.width; dh = canvas.height;
+        gl.activeTexture(gl.TEXTURE1);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, dw, dh, 0, gl.RGBA, gl.FLOAT, null);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dataTex, 0);
+      }
+      const L = iter.L;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.useProgram(iter.p);
+      gl.uniform2f(L.res, F[0], F[1]); gl.uniform1f(L.scale, F[2]); gl.uniform2f(L.off, F[4], F[5]);
+      gl.uniform2f(L.org, F[26], F[1] - F[27] - canvas.height);   // GL pixel origin is bottom-left
+      gl.uniform1i(L.maxIter, U32[24]); gl.uniform1i(L.refLen, U32[25]);
+      gl.enable(gl.SCISSOR_TEST);
+      for (const r of rects) { gl.scissor(...r); gl.drawArrays(gl.TRIANGLES, 0, 3); gl.flush(); }
+      gl.disable(gl.SCISSOR_TEST);
+    },
+    colorize() {
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      const L = color.L;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.useProgram(color.p);
+      gl.uniform1f(L.cycleLen, F[3]); gl.uniform1f(L.phase, F[6]); gl.uniform1f(L.relief, F[7]);
+      gl.uniform3f(L.pa, F[8], F[9], F[10]); gl.uniform3f(L.pb, F[12], F[13], F[14]);
+      gl.uniform3f(L.pc, F[16], F[17], F[18]); gl.uniform3f(L.pd, F[20], F[21], F[22]);
+      gl.uniform2f(L.lightDir, F[11], F[15]); gl.uniform1f(L.lightH, F[19]); gl.uniform1i(L.mapping, F[23]);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);   // sync so frame time is measurable
+      return Promise.resolve();
+    },
+    finish() {
+      const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); gl.flush();
+      return new Promise(res => (function poll() {
+        if (gl.clientWaitSync(sync, 0, 0) === gl.TIMEOUT_EXPIRED) setTimeout(poll, 4);
+        else { gl.deleteSync(sync); res(); }
+      })());
+    },
+    destroy() { gl.getExtension('WEBGL_lose_context')?.loseContext(); },
+  };
+}
+
+// ---------- Backend management ----------
+const $ = id => document.getElementById(id);
+const stage = $('stage');
+let canvas = $('c'), R = null, dirty = true, colorDirty = false, busy = false, lastMs = 0, fullMs = 0;
+
+async function setBackend(kind) {
+  if (R) { R.destroy(); R = null; const c = canvas.cloneNode(); canvas.replaceWith(c); canvas = c; }
+  applySize();
+  try {
+    R = kind === 'webgpu' ? await createWebGPU(canvas) : createWebGL(canvas);
+  } catch (e) {
+    console.warn(e);
+    if (kind === 'webgpu') {
+      $('backend').querySelector('[value=webgpu]').disabled = true;
+      setNote('WebGPU unavailable (' + e.message + ') — using WebGL2 fallback.', true);
+      return setBackend('webgl');
+    }
+    return fatal('Neither WebGPU nor WebGL2 (with float render targets) is available: ' + e.message);
+  }
+  $('backend').value = kind;
+  $('backendBadge').textContent = R.name;
+  R.setOrbit(ref.orbit, ref.len);
+  dirty = true;
+}
+
+function fatal(msg) {
+  const el = $('err'); el.style.display = 'grid'; el.textContent = msg;
+}
+
+// ---------- Rendering loop ----------
+let interacting = false, settleTimer = 0, lastT = performance.now();
+function applySize() {
+  const low = interacting && fullMs > 35;           // drop resolution while moving if frames are slow
+  const dpr = Math.min(devicePixelRatio || 1, 2) * opts.quality * (low ? 0.5 : 1);
+  const w = Math.max(1, Math.round(innerWidth * dpr)), h = Math.max(1, Math.round(innerHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+}
+
+// Progressive tiled rendering: each frame iterates as many tiles (center first) as fit a ~25 ms
+// budget, then colorizes. The budget adapts from measured throughput (pixel·iterations per ms).
+const TILE = 128, FRAME_MS = 25;
+let job = null, rate = 2e8;
+function makeJob() {
+  const W = canvas.width, H = canvas.height, tiles = [];
+  for (let y = 0; y < H; y += TILE) for (let x = 0; x < W; x += TILE)
+    tiles.push([x, y, Math.min(TILE, W - x), Math.min(TILE, H - y)]);
+  const d = t => Math.hypot(t[0] + t[2] / 2 - W / 2, t[1] + t[3] / 2 - H / 2);
+  tiles.sort((a, b) => d(a) - d(b));
+  return { tiles, next: 0, t0: performance.now(), lowRes: interacting && fullMs > 35 };
+}
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (exporting) return;
+  const dt = Math.min(0.1, (now - lastT) / 1000); lastT = now;
+  if (opts.autoZoom) zoomAt(innerWidth / 2, innerHeight / 2, 0.985);
+  if (opts.speed) { setPhase(opts.phase + opts.speed * dt); }
+  if (!R || busy) return;
+  if (dirty) { dirty = false; applySize(); job = makeJob(); }
+  if (!job && !colorDirty) return;
+  colorDirty = false; busy = true;
+  fillUniforms();
+  const t0 = performance.now();
+  let px = 0;
+  if (job) {
+    const budget = rate * FRAME_MS / U32[24], batch = [];
+    while (job.next < job.tiles.length && (px === 0 || px < budget)) {
+      const t = job.tiles[job.next++]; batch.push(t); px += t[2] * t[3];
+    }
+    R.iterTiles(batch);
+  }
+  R.colorize().then(() => {
+    const ms = performance.now() - t0;
+    if (px) rate = Math.max(1e5, 0.5 * rate + 0.5 * px * U32[24] / Math.max(ms, 1));
+    if (job && job.next >= job.tiles.length) {
+      lastMs = performance.now() - job.t0; if (!job.lowRes) fullMs = lastMs; job = null;
+    }
+    busy = false; updateHud();
+  }, e => { busy = false; console.error(e); });
+}
+
+// ---------- View manipulation ----------
+function changed() {
+  dirty = true; interacting = true;
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => { interacting = false; dirty = true; writeHash(); }, 160);
+  scheduleRef();
+}
+function panBy(dxCss, dyCss) {
+  const s = view.h / innerHeight;
+  view.cx -= fromNum(dxCss * s); view.cy += fromNum(dyCss * s);
+  changed();
+}
+function zoomAt(xCss, yCss, f) {
+  const nh = Math.min(MAX_H, Math.max(MIN_H, view.h * f));
+  f = nh / view.h; if (f === 1) { if (opts.autoZoom && nh === MIN_H) setAutoZoom(false); return; }
+  const s = view.h / innerHeight;
+  const ox = (xCss - innerWidth / 2) * s, oy = -(yCss - innerHeight / 2) * s;
+  view.cx += fromNum(ox * (1 - f)); view.cy += fromNum(oy * (1 - f));
+  view.h = nh;
+  changed();
+}
+function goTo(re, im, h) {
+  view.cx = parseDec(re); view.cy = parseDec(im);
+  view.h = Math.min(MAX_H, Math.max(MIN_H, h));
+  changed(); requestRef();
+}
+
+// Pointer / touch
+const pointers = new Map();
+let pinch = null;
+stage.addEventListener('pointerdown', e => {
+  stage.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  stage.classList.add('drag');
+  if (pointers.size === 2) pinch = pinchState();
+});
+stage.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId); if (!p) return;
+  if (pointers.size === 1) { panBy(e.clientX - p.x, e.clientY - p.y); }
+  p.x = e.clientX; p.y = e.clientY;
+  if (pointers.size === 2 && pinch) {
+    const n = pinchState();
+    panBy(n.x - pinch.x, n.y - pinch.y);
+    zoomAt(n.x, n.y, pinch.d / n.d);
+    pinch = n;
+  }
+});
+const endPointer = e => {
+  pointers.delete(e.pointerId); pinch = pointers.size === 2 ? pinchState() : null;
+  if (!pointers.size) stage.classList.remove('drag');
+};
+stage.addEventListener('pointerup', endPointer);
+stage.addEventListener('pointercancel', endPointer);
+function pinchState() {
+  const [a, b] = [...pointers.values()];
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)) };
+}
+stage.addEventListener('wheel', e => {
+  e.preventDefault();
+  const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  zoomAt(e.clientX, e.clientY, Math.exp(dy * (e.ctrlKey ? 0.01 : 0.0015)));
+}, { passive: false });
+stage.addEventListener('dblclick', e => zoomAt(e.clientX, e.clientY, e.shiftKey ? 4 : 0.25));
+
+addEventListener('keydown', e => {
+  if (e.target.matches('textarea, input[type=text], input[type=number], select')) return;
+  const step = 80;
+  switch (e.key) {
+    case 'ArrowLeft': panBy(step, 0); break;
+    case 'ArrowRight': panBy(-step, 0); break;
+    case 'ArrowUp': panBy(0, step); break;
+    case 'ArrowDown': panBy(0, -step); break;
+    case '+': case '=': zoomAt(innerWidth / 2, innerHeight / 2, 0.5); break;
+    case '-': case '_': zoomAt(innerWidth / 2, innerHeight / 2, 2); break;
+    case 'r': case 'R': goTo(HOME.re, HOME.im, HOME.h); break;
+    case 'h': case 'H': togglePanel(); break;
+    case 'Escape': if (exporting) exportCancel = true; break;
+    case 'c': case 'C': setSpeed(opts.speed ? 0 : 0.2); break;
+    default: return;
+  }
+  e.preventDefault();
+});
+addEventListener('resize', () => { dirty = true; updateExportLabels(); });
+
+// ---------- Color map previews ----------
+function palRGB(p, t) {
+  return [0, 1, 2].map(k => Math.round(255 * Math.min(1, Math.max(0, p[1][k] + p[2][k] * Math.cos(2 * Math.PI * (p[3][k] * t + p[4][k]))))));
+}
+function drawStrip(cnv, p, tAt) {
+  const ctx = cnv.getContext('2d'), w = cnv.width, h = cnv.height, img = ctx.createImageData(w, 1);
+  for (let x = 0; x < w; x++) { const [r, g, b] = palRGB(p, tAt(x / w)); img.data.set([r, g, b, 255], x * 4); }
+  for (let y = 0; y < h; y++) ctx.putImageData(img, 0, y);
+}
+// Strip of the active map: 4 color cycles with the current offset (moves while cycling)
+function drawCurrentStrip() {
+  drawStrip($('curStrip'), PALETTES[opts.palette], f => 4 * f + opts.phase);
+}
+function buildSwatches() {
+  const box = $('swatches');
+  PALETTES.forEach((p, i) => {
+    const el = document.createElement('div'); el.className = 'swatch'; el.dataset.i = i;
+    const c = document.createElement('canvas'); c.width = 240; c.height = 14;
+    el.append(p[0], c); box.append(el);
+    drawStrip(c, p, f => f);                          // one full cycle
+    el.onclick = () => { opts.palette = i; markSwatch(); colorDirty = true; };
+  });
+  markSwatch();
+}
+function markSwatch() {
+  for (const el of $('swatches').children) el.classList.toggle('sel', +el.dataset.i === opts.palette);
+  drawCurrentStrip();
+}
+
+// ---------- UI ----------
+function setNote(msg, warn) { const n = $('note'); n.textContent = msg; n.className = 'help' + (warn ? ' warn' : ''); }
+function digits() { return Math.max(6, Math.ceil(Math.log10(canvas.height / view.h)) + 3); }
+function updateHud() {
+  const d = digits();
+  if (document.activeElement !== $('re')) $('re').value = toDec(view.cx, d);
+  if (document.activeElement !== $('im')) $('im').value = toDec(view.cy, d);
+  if (document.activeElement !== $('zoom')) $('zoom').value = (3 / view.h).toExponential(4);
+  if (document.activeElement !== $('iters')) $('iters').value = maxIter();
+  $('sZoom').textContent = (3 / view.h).toExponential(3) + (view.h <= MIN_H * 1.0001 ? ' (limit)' : '');
+  $('sPix').textContent = (view.h / canvas.height).toExponential(2);
+  $('sIter').textContent = maxIter().toLocaleString();
+  $('sRef').textContent = ref.len.toLocaleString() + ' it · ' + ref.ms.toFixed(0) + ' ms';
+  $('sBits').textContent = ref.bits ? ref.bits + ' bits (~' + Math.floor(ref.bits * 0.30103) + ' digits)' : '—';
+  $('sMs').textContent = job ? 'rendering ' + Math.round(100 * job.next / job.tiles.length) + ' %'
+    : lastMs.toFixed(0) + ' ms @ ' + canvas.width + '×' + canvas.height;
+}
+function togglePanel() { $('panel').classList.toggle('hidden'); $('toggle').textContent = $('panel').classList.contains('hidden') ? '+' : '–'; }
+function setAutoZoom(on) { opts.autoZoom = on; $('autozoom').checked = on; }
+
+function setPhase(v) {
+  opts.phase = ((v % 1) + 1) % 1;
+  $('phase').value = opts.phase; $('vPhase').textContent = opts.phase.toFixed(3);
+  drawCurrentStrip(); colorDirty = true;
+}
+function setSpeed(v) {
+  opts.speed = v; $('speed').value = v;
+  $('vSpeed').textContent = v ? v.toFixed(2) + '/s' : 'off';
+}
+function setCycleLen(log2v) {
+  opts.cycleLen = 2 ** log2v; $('cycleLen').value = log2v;
+  $('vCycleLen').textContent = opts.cycleLen < 100 ? opts.cycleLen.toFixed(1) : Math.round(opts.cycleLen);
+  drawCurrentStrip(); colorDirty = true;
+}
+const bindSlider = (id, key, fmt) => {
+  const show = () => { $('v' + id[0].toUpperCase() + id.slice(1)).textContent = fmt(opts[key]); };
+  $(id).value = opts[key]; show();
+  $(id).oninput = e => { opts[key] = +e.target.value; show(); colorDirty = true; };
+};
+
+function writeHash() {
+  const d = digits();
+  history.replaceState(null, '', '#re=' + toDec(view.cx, d) + '&im=' + toDec(view.cy, d) + '&h=' + view.h.toExponential(6));
+}
+function readHash() {
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (q.has('re') && q.has('im') && q.has('h')) { try { goTo(q.get('re'), q.get('im'), +q.get('h')); } catch (e) { console.warn(e); } }
+}
+
+PRESETS.forEach(([n], i) => $('preset').add(new Option(n, i)));
+buildSwatches();
+$('preset').onchange = e => { const p = PRESETS[e.target.value][1]; goTo(p.re, p.im, p.h); };
+$('backend').onchange = e => setBackend(e.target.value);
+$('quality').onchange = e => { opts.quality = +e.target.value; dirty = true; updateExportLabels(); };
+$('autoIter').onchange = e => { opts.autoIter = e.target.checked; opts.manualIter = +$('iters').value || 1000; changed(); };
+$('iters').onchange = e => {
+  opts.manualIter = Math.max(16, Math.round(+e.target.value) || 1000);
+  opts.autoIter = false; $('autoIter').checked = false; changed(); requestRef();
+};
+$('autozoom').onchange = e => setAutoZoom(e.target.checked);
+
+$('cycleLen').oninput = e => setCycleLen(+e.target.value);
+$('mapping').onchange = e => { opts.mapping = +e.target.value; drawCurrentStrip(); colorDirty = true; };
+$('phase').oninput = e => setPhase(+e.target.value);
+$('speed').oninput = e => setSpeed(Math.abs(+e.target.value) < 0.02 ? 0 : +e.target.value);
+$('stopCycle').onclick = () => setSpeed(0);
+$('reverse').onclick = () => setSpeed(-(opts.speed || -0.2));
+bindSlider('relief', 'relief', v => v.toFixed(2));
+bindSlider('light', 'light', v => v + '°');
+bindSlider('lightH', 'lightH', v => v.toFixed(2));
+setCycleLen(Math.log2(opts.cycleLen)); setPhase(0); setSpeed(0);
+
+$('toggle').onclick = togglePanel;
+$('reset').onclick = () => goTo(HOME.re, HOME.im, HOME.h);
+$('go').onclick = () => {
+  try {
+    const z = parseFloat($('zoom').value);
+    if (!(z > 0)) throw Error('bad zoom');
+    goTo($('re').value, $('im').value, 3 / z); setNote('');
+  } catch (e) { setNote(e.message, true); }
+};
+$('copy').onclick = () => { writeHash(); navigator.clipboard?.writeText(location.href).then(() => setNote('Link copied.')); };
+$('png').onclick = () => exportPNG(+$('pngScale').value);
+$('cancelExport').onclick = () => { exportCancel = true; };
+
+// ---------- High-resolution PNG export ----------
+// Renders a W×H image (screen size × mult) in 2048² chunks through the normal pipeline and
+// stitches them into a 2D canvas, so neither GPU texture limits nor the watchdog are hit.
+let exporting = false, exportCancel = false;
+const exportSize = mult => {
+  const dpr = Math.min(devicePixelRatio || 1, 2) * opts.quality;
+  let W = Math.round(innerWidth * dpr) * mult, H = Math.round(innerHeight * dpr) * mult;
+  const k = Math.min(1, Math.sqrt(250e6 / (W * H)), 32767 / Math.max(W, H));   // browser canvas limits
+  return [Math.floor(W * k), Math.floor(H * k)];
+};
+async function exportPNG(mult) {
+  if (exporting || !R) return;
+  exporting = true; exportCancel = false; job = null;
+  while (busy) await new Promise(r => setTimeout(r, 10));
+  const [W, H] = exportSize(mult), CH = 2048;
+  const prog = $('progress'), progText = $('progText');
+  prog.style.display = 'flex';
+  try {
+    const out = document.createElement('canvas'); out.width = W; out.height = H;
+    const octx = out.getContext('2d');
+    if (!octx) throw Error('browser cannot allocate a ' + W + '×' + H + ' canvas');
+    canvas.style.opacity = 0;
+    canvas.width = CH; canvas.height = CH;
+    const chunks = [];
+    for (let y = 0; y < H; y += CH) for (let x = 0; x < W; x += CH) chunks.push([x, y]);
+    const tiles = [];
+    for (let y = 0; y < CH; y += TILE) for (let x = 0; x < CH; x += TILE) tiles.push([x, y, TILE, TILE]);
+    const total = chunks.length * tiles.length;
+    for (let c = 0; c < chunks.length; c++) {
+      const [ox, oy] = chunks[c], w = Math.min(CH, W - ox), h = Math.min(CH, H - oy);
+      fillUniforms({ W, H, ox, oy });
+      // only tiles that overlap the used part of this chunk (GL scissor is bottom-up)
+      const need = tiles.filter(t => t[0] < w && (R.name === 'WebGL2' ? t[1] + TILE > CH - h : t[1] < h));
+      for (let i = 0; i < need.length; i += 8) {
+        if (exportCancel) throw Error('cancelled');
+        R.iterTiles(need.slice(i, i + 8));
+        await R.finish();
+        const done = c * tiles.length + Math.round((i + 8) / need.length * tiles.length);
+        progText.textContent = `Rendering ${W}×${H} PNG … ${Math.min(100, Math.round(100 * done / total))} %`;
+      }
+      R.colorize();                                        // grab in the same task, while the frame is valid
+      octx.drawImage(canvas, 0, 0, w, h, ox, oy, w, h);
+    }
+    progText.textContent = `Encoding ${W}×${H} PNG …`;
+    const blob = await new Promise(r => out.toBlob(r, 'image/png'));
+    if (!blob) throw Error('PNG encoding failed (image too large for this browser)');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `mandelbrot-${W}x${H}.png`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    setNote(`Saved ${W}×${H} PNG (${(blob.size / 1e6).toFixed(1)} MB).`);
+  } catch (e) {
+    setNote('PNG export ' + (e.message === 'cancelled' ? 'cancelled.' : 'failed: ' + e.message), e.message !== 'cancelled');
+  } finally {
+    exporting = false; prog.style.display = 'none'; canvas.style.opacity = '';
+    dirty = true;
+  }
+}
+function updateExportLabels() {
+  for (const o of $('pngScale').options) o.textContent = o.value + '× (' + exportSize(+o.value).join('×') + ')';
+}
+
+// ---------- Start ----------
+(async () => {
+  const forceGL = /[?&]gl\b/.test(location.search);
+  await setBackend(forceGL ? 'webgl' : 'webgpu');
+  readHash();
+  requestRef();
+  updateExportLabels();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
